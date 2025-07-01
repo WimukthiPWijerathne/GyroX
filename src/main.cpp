@@ -16,22 +16,22 @@ const int PWM_CHANNEL_A = 0;
 const int PWM_CHANNEL_B = 1;
 const int PWM_MAX = 255;
 const int MIN_PWM_THRESHOLD = 55;
-const float LOOP_INTERVAL_MS = 5.0; // 200Hz control loop
-const float DEAD_BAND = 0.1; // Deadband to prevent motor jitter
+const float LOOP_INTERVAL_MS = 7.0; // 200Hz control loop
+const float DEAD_BAND = 0.5; // Deadband to prevent motor jitter
 
 // PID Constants
-const float KP = 18.3;
-const float KI = 0.73;
-const float KD = 0.85;
-const float NON_LINEAR_GAIN = 6.9; // Gain for large angles
-const float ANGLE_THRESHOLD = 12.8; // Angle threshold for non-linear control
+const float KP = 18.5;
+const float KI = 1.46;
+const float KD = 0.175;
+const float NON_LINEAR_GAIN = 8.2; // Gain for large angles
+const float ANGLE_THRESHOLD = 7.99; // Angle threshold for non-linear control
 const float MAX_INTEGRAL = 50.0; // Limit for integral windup
-const float TARGET_ANGLE = 0.019;
-const float MAX_PWM_NORMAL = 115.0;
-const float MAX_PWM_BOOST = 240.0; // Higher PWM for large angles
+const float TARGET_ANGLE = 0.19;
+const float MAX_PWM_NORMAL = 85.0;
+const float MAX_PWM_BOOST = 160.0; // Higher PWM for large angles
 
 // Filtered Angle
-const float ALPHA = 0.908; // Smoother low-pass filter
+const float ALPHA = 0.155; // Smoother low-pass filter
 
 MPU6050 mpu(Wire);
 
@@ -148,7 +148,6 @@ void loop() {
     mpu.update();
     float rawAngle = mpu.getAngleX();
     filteredAngle = ALPHA * filteredAngle + (1 - ALPHA) * rawAngle;
-
     float pidOutput = computePID(filteredAngle, dt);
     driveMotor(pidOutput);
   }
@@ -158,4 +157,5 @@ void loop() {
     Serial.printf("Angle: %.2f | Error: %.2f | PID: %.2f\n", filteredAngle, TARGET_ANGLE - filteredAngle, computePID(filteredAngle, LOOP_INTERVAL_MS / 1000.0));
     lastDebugTime = now;
   }
+
 }
