@@ -15,23 +15,25 @@ const int PWM_RESOLUTION = 8;
 const int PWM_CHANNEL_A = 0;
 const int PWM_CHANNEL_B = 1;
 const int PWM_MAX = 255;
-const int MIN_PWM_THRESHOLD = 55;
-const float LOOP_INTERVAL_MS = 7.0; // 200Hz control loop
-const float DEAD_BAND = 0.5; // Deadband to prevent motor jitter
+const int MIN_PWM_THRESHOLD = 40; // Smooth starts
+const float LOOP_INTERVAL_MS = 5.0; // 200Hz control loop
+const float DEAD_BAND = 0.3; // Reduces jitter
+const float MAX_ANGLE = 15.0; // Maximum angle to prevent falling damage
 
 // PID Constants
-const float KP = 18.5;
-const float KI = 1.46;
-const float KD = 0.175;
-const float NON_LINEAR_GAIN = 8.2; // Gain for large angles
-const float ANGLE_THRESHOLD = 7.99; // Angle threshold for non-linear control
-const float MAX_INTEGRAL = 50.0; // Limit for integral windup
-const float TARGET_ANGLE = 0.19;
-const float MAX_PWM_NORMAL = 85.0;
-const float MAX_PWM_BOOST = 160.0; // Higher PWM for large angles
+const float KP = 12.0; // Stable for large angles
+const float KI = 0.5;  // Increased for steady-state error correction
+const float KD = 1.8;  // Increased for better damping
+const float NON_LINEAR_GAIN = 1.2; // Non-linear control
+const float ANGLE_THRESHOLD = 5.0; // Apply non-linear control earlier
+const float MAX_INTEGRAL = 15.0; // Tighter integral limit
+const float INTEGRAL_ERROR_THRESHOLD = 2.0; // Integral active for small errors
+const float TARGET_ANGLE = 0.0;
+const float MAX_PWM_NORMAL = 100.0; // Normal PWM limit
+const float MAX_PWM_BOOST = 200.0; // Slightly increased for recovery
 
 // Filtered Angle
-const float ALPHA = 0.155; // Smoother low-pass filter
+const float ALPHA = 0.98; // Smoother low-pass filter
 
 MPU6050 mpu(Wire);
 
@@ -39,8 +41,20 @@ MPU6050 mpu(Wire);
 float previousError = 0.0;
 float integralSum = 0.0;
 float filteredAngle = 0.0;
+int prevPwm = 0; // For PWM smoothing
 
 void driveMotor(float pidValue) {
+  // Check if angle exceeds safe limit
+  if (abs(filteredAngle) > MAX_ANGLE) {
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, LOW);
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, LOW);
+    ledcWrite(PWM_CHANNEL_A, 0);
+    ledcWrite(PWM_CHANNEL_B, 0);
+    return;
+  }
+
   // Apply deadband to reduce jitter
   if (abs(pidValue) < DEAD_BAND) {
     pidValue = 0;
@@ -55,6 +69,10 @@ void driveMotor(float pidValue) {
   if (pwm > 0 && pwm < MIN_PWM_THRESHOLD) {
     pwm = MIN_PWM_THRESHOLD;
   }
+
+  // Smooth PWM transitions using exponential smoothing
+  pwm = (0.9 * prevPwm + 0.1 * pwm); // 90% previous, 10% new
+  prevPwm = pwm;
 
   // Motor direction control
   if (limitedValue > 0) { // Forward
@@ -88,8 +106,10 @@ float computePID(float currentAngle, float dt) {
     pTerm *= (1.0 + NON_LINEAR_GAIN * (abs(error) - ANGLE_THRESHOLD) / ANGLE_THRESHOLD);
   }
 
-  // Integral with anti-windup
-  integralSum = constrain(integralSum + error * dt, -MAX_INTEGRAL, MAX_INTEGRAL);
+  // Conditional integral for small errors to prevent windup
+  if (abs(error) < INTEGRAL_ERROR_THRESHOLD) {
+    integralSum = constrain(integralSum + error * dt, -MAX_INTEGRAL, MAX_INTEGRAL);
+  }
   float iTerm = KI * integralSum;
 
   // Derivative term
@@ -127,7 +147,7 @@ void setup() {
   }
 
   Serial.println(F("Calibrating... Keep MPU still"));
-  delay(1000);
+  delay(2000); // Increased calibration time
   mpu.calcOffsets();
   Serial.println(F("Calibration complete!"));
 
@@ -148,14 +168,23 @@ void loop() {
     mpu.update();
     float rawAngle = mpu.getAngleX();
     filteredAngle = ALPHA * filteredAngle + (1 - ALPHA) * rawAngle;
+
     float pidOutput = computePID(filteredAngle, dt);
     driveMotor(pidOutput);
   }
 
   // Debug output every 200ms
   if (now - lastDebugTime >= 200) {
-    Serial.printf("Angle: %.2f | Error: %.2f | PID: %.2f\n", filteredAngle, TARGET_ANGLE - filteredAngle, computePID(filteredAngle, LOOP_INTERVAL_MS / 1000.0));
+    float error = TARGET_ANGLE - filteredAngle;
+    float pTerm = KP * error;
+    if (abs(error) > ANGLE_THRESHOLD) {
+      pTerm *= (1.0 + NON_LINEAR_GAIN * (abs(error) - ANGLE_THRESHOLD) / ANGLE_THRESHOLD);
+    }
+    float iTerm = KI * integralSum;
+    float derivative = (error - previousError) / (LOOP_INTERVAL_MS / 1000.0);
+    float dTerm = KD * derivative;
+    Serial.printf("Angle: %.2f | Error: %.2f | P: %.2f | I: %.2f | D: %.2f | PID: %.2f | dt: %.4f\n",
+                  filteredAngle, error, pTerm, iTerm, dTerm, pTerm + iTerm + dTerm, LOOP_INTERVAL_MS / 1000.0);
     lastDebugTime = now;
   }
-
 }
