@@ -1,5 +1,12 @@
 #include <Wire.h>
 #include <MPU6050_light.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+// WiFi Credentials
+const char* ssid = "randilsk";
+const char* password = "lkci2721";
+WebServer server(80);
 
 // Motor Pin Definitions
 const int AIN1 = 25;
@@ -15,23 +22,27 @@ const int PWM_RESOLUTION = 8;
 const int PWM_CHANNEL_A = 0;
 const int PWM_CHANNEL_B = 1;
 const int PWM_MAX = 255;
-const int MIN_PWM_THRESHOLD = 55;
-const float LOOP_INTERVAL_MS = 5.0; // 200Hz control loop
-const float DEAD_BAND = 0.1; // Deadband to prevent motor jitter
+const int MIN_PWM_THRESHOLD = 50;
+const float LOOP_INTERVAL_MS = 0.001; // 200Hz control loop
+const float DEAD_BAND = 0.15; // Deadband to prevent motor jitter
 
 // PID Constants
-const float KP = 17.2;
-const float KI = 0.93;
-const float KD = 0.25;
-const float NON_LINEAR_GAIN = 4.9; // Gain for large angles
-const float ANGLE_THRESHOLD = 9.8; // Angle threshold for non-linear control
-const float MAX_INTEGRAL = 50.0; // Limit for integral windup
-const float TARGET_ANGLE = 0.019;
-const float MAX_PWM_NORMAL = 115.0;
-const float MAX_PWM_BOOST = 240.0; // Higher PWM for large angles
+const float KP = 1.42;
+const float KI = 0.51;
+const float KD = 0.9;
+const float NON_LINEAR_GAIN = 0.5; // Gain for large angles
+const float ANGLE_THRESHOLD = 1.09; // Angle threshold for non-linear control
+const float MAX_INTEGRAL = 30.0; // Limit for integral windup
+float TARGET_ANGLE = 0.19; // Default target angle for balance
+const float MAX_PWM_NORMAL = 55.0;
+const float MAX_PWM_BOOST = 90.0; // Higher PWM for large angles
+
+// Movement Angles
+const float FORWARD_ANGLE_OFFSET = -2.0; // Tilt forward to move forward
+const float BACKWARD_ANGLE_OFFSET = 2.0; // Tilt backward to move backward
 
 // Filtered Angle
-const float ALPHA = 0.45; // Smoother low-pass filter
+const float ALPHA = 0.895; // Smoother low-pass filter
 
 MPU6050 mpu(Wire);
 
@@ -39,6 +50,32 @@ MPU6050 mpu(Wire);
 float previousError = 0.0;
 float integralSum = 0.0;
 float filteredAngle = 0.0;
+
+// WiFi Command State
+String currentCommand = "stop";
+
+void handleCommand() {
+  String command;
+  // Accept both form data and raw body for maximum compatibility
+  if (server.hasArg("command")) {
+    command = server.arg("command");
+  } else if (server.hasArg("plain")) {
+    command = server.arg("plain");
+  } else {
+    server.send(400, "text/plain", "Body not found");
+    return;
+  }
+  command.trim();
+  Serial.println("Command received: " + command);
+
+  if (command == "forward" || command == "backward" || command == "stop") {
+    currentCommand = command;
+    server.send(200, "text/plain", "Command accepted");
+  } else {
+    server.send(200, "text/plain", "Command ignored");
+  }
+}
+
 
 void driveMotor(float pidValue) {
   // Apply deadband to reduce jitter
@@ -98,6 +135,7 @@ float computePID(float currentAngle, float dt) {
 
   // Compute PID output
   float pidOutput = pTerm + iTerm + KD * derivative;
+  pidOutput = constrain(pidOutput, -150, 150);
   return pidOutput;
 }
 
@@ -131,6 +169,24 @@ void setup() {
   mpu.calcOffsets();
   Serial.println(F("Calibration complete!"));
 
+  // WiFi setup
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected to WiFi");
+  Serial.println(WiFi.localIP());
+
+  server.on("/command", HTTP_POST, handleCommand);
+  server.on("/ping", HTTP_GET, []() {
+    server.send(200, "text/plain", "pong");
+  });
+
+  server.begin();
+  Serial.println("HTTP server started");
+
   mpu.update();
   filteredAngle = mpu.getAngleX();
 }
@@ -139,6 +195,27 @@ void loop() {
   static unsigned long lastControlTime = 0;
   static unsigned long lastDebugTime = 0;
   unsigned long now = millis();
+
+  // Handle WiFi clients
+  server.handleClient();
+
+float angleStep = 0.02;  // Smooth angle increment per loop
+
+if (currentCommand == "forward") {
+    if (TARGET_ANGLE > 0.19 + FORWARD_ANGLE_OFFSET) {
+        TARGET_ANGLE -= angleStep;
+    }
+} else if (currentCommand == "backward") {
+    if (TARGET_ANGLE < 0.19 + BACKWARD_ANGLE_OFFSET) {
+        TARGET_ANGLE += angleStep;
+    }
+} else {
+    if (TARGET_ANGLE > 0.19) {
+        TARGET_ANGLE -= angleStep;
+    } else if (TARGET_ANGLE < 0.19) {
+        TARGET_ANGLE += angleStep;
+    }
+}
 
   // Control loop at 200Hz
   if (now - lastControlTime >= LOOP_INTERVAL_MS) {
@@ -155,7 +232,10 @@ void loop() {
 
   // Debug output every 200ms
   if (now - lastDebugTime >= 200) {
-    Serial.printf("Angle: %.2f | Error: %.2f | PID: %.2f\n", filteredAngle, TARGET_ANGLE - filteredAngle, computePID(filteredAngle, LOOP_INTERVAL_MS / 1000.0));
+    Serial.printf("Angle: %.2f | Error: %.2f | PID: %.2f | Command: %s\n", 
+                  filteredAngle, TARGET_ANGLE - filteredAngle, 
+                  computePID(filteredAngle, LOOP_INTERVAL_MS / 1000.0), 
+                  currentCommand.c_str());
     lastDebugTime = now;
   }
 }
