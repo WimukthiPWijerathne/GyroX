@@ -20,18 +20,18 @@ const float LOOP_INTERVAL_MS = 5.0; // 200Hz control loop
 const float DEAD_BAND = 0.1; // Deadband to prevent motor jitter
 
 // PID Constants
-const float KP = 18.3;
-const float KI = 0.73;
-const float KD = 0.85;
-const float NON_LINEAR_GAIN = 6.9; // Gain for large angles
-const float ANGLE_THRESHOLD = 12.8; // Angle threshold for non-linear control
+const float KP = 18.0;
+const float KI = 0.6;
+const float KD = 1.2;
+const float NON_LINEAR_GAIN = 2.0; // Gain for large angles
+const float ANGLE_THRESHOLD = 10.0; // Angle threshold for non-linear control
 const float MAX_INTEGRAL = 50.0; // Limit for integral windup
-const float TARGET_ANGLE = 0.019;
-const float MAX_PWM_NORMAL = 115.0;
-const float MAX_PWM_BOOST = 240.0; // Higher PWM for large angles
+const float TARGET_ANGLE = 0.0;
+const float MAX_PWM_NORMAL = 110.0;
+const float MAX_PWM_BOOST = 180.0; // Higher PWM for large angles
 
 // Filtered Angle
-const float ALPHA = 0.908; // Smoother low-pass filter
+const float ALPHA = 0.95; // Smoother low-pass filter
 
 MPU6050 mpu(Wire);
 
