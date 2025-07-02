@@ -1,58 +1,48 @@
-#include <PID_v1.h>
-#include "I2Cdev.h"
-#include "MPU6050_6Axis_MotionApps20.h"
+#include <Wire.h>
+#include <MPU6050_light.h>
 #include <WiFi.h>
 #include <WebServer.h>
-
-#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
- #include "Wire.h"
-#endif
 
 // WiFi Credentials
 const char* ssid = "randilsk";
 const char* password = "lkci2721";
 WebServer server(80);
 
-// Motor Pin Definitions (ESP32-compatible)
-const int AIN1 = 25;  // Motor A direction
-const int AIN2 = 33;  // Motor A direction
-const int PWMA = 32;  // Motor A PWM
-const int BIN1 = 27;  // Motor B direction
-const int BIN2 = 14;  // Motor B direction
-const int PWMB = 13;  // Motor B PWM
-const int STBY = 26;  // Motor driver standby
+// Motor Pin Definitions
+const int AIN1 = 25;
+const int AIN2 = 33;
+const int PWMA = 32;
+const int BIN1 = 27;
+const int BIN2 = 14;
+const int PWMB = 13;
+const int STBY = 26;
 
-// PWM Configuration
 const int PWM_FREQ = 1000;
 const int PWM_RESOLUTION = 8;
 const int PWM_CHANNEL_A = 0;
 const int PWM_CHANNEL_B = 1;
 const int PWM_MAX = 255;
-const int MIN_ABS_SPEED = 55;  // Minimum PWM threshold
-const float DEAD_BAND = 0.1;   // Deadband to prevent motor jitter
+const int MIN_PWM_THRESHOLD = 55;
+const float LOOP_INTERVAL_MS = 5; // 200Hz control loop
+const float DEAD_BAND = 0.1; // Deadband to prevent motor jitter
 
 // PID Constants
-double Kp = 60;
-double Ki = 270;
-double Kd = 2.2;
+float KP = 6;
+float KI = 0.72;
+float KD = 0.95;
 const float NON_LINEAR_GAIN = 5.9;
 const float ANGLE_THRESHOLD = 3.8;
 const float MAX_INTEGRAL = 50.0;
-double originalSetpoint = 181.0;
-double setpoint = originalSetpoint;
-double movingAngleOffsetForward = -2.0;  // Tilt forward to move
-double movingAngleOffsetBackward = 2.0;  // Tilt backward to move
+float TARGET_ANGLE = 0.019;
 const float MAX_PWM_NORMAL = 115.0;
 const float MAX_PWM_BOOST = 235.0;
 
-// Adaptive PID Tuning
-const float KP_MAX = 80.0;
-const float KP_MIN = 40.0;
-const float ERROR_THRESHOLD_HIGH = 5.0;
-const float ERROR_THRESHOLD_LOW = 1.0;
+// Movement Angles
+const float FORWARD_ANGLE_OFFSET = -2.0;
+const float BACKWARD_ANGLE_OFFSET = 2.0;
 
 // Filtered Angle
-const float ALPHA = 0.65;  // Angle low-pass filter
+const float ALPHA = 0.65; // Angle low-pass filter
 const float DERIVATIVE_ALPHA = 0.8; // Derivative low-pass filter
 
 // Disturbance Observer Parameters
@@ -64,33 +54,24 @@ float estimatedDisturbance = 0.0;
 const float FEEDFORWARD_GAIN = 0.1;
 const float VELOCITY_THRESHOLD = 0.5;
 
-// MPU6050 and PID Variables
-MPU6050 mpu;
-bool dmpReady = false;
-uint8_t mpuIntStatus;
-uint8_t devStatus;
-uint16_t packetSize;
-uint16_t fifoCount;
-uint8_t fifoBuffer[64];
-Quaternion q;
-VectorFloat gravity;
-float ypr[3];
-double input, output;
+// Adaptive PID Tuning
+const float KP_MAX = 25.0;
+const float KP_MIN = 10.0;
+const float ERROR_THRESHOLD_HIGH = 5.0;
+const float ERROR_THRESHOLD_LOW = 1.0;
+
+MPU6050 mpu(Wire);
+
+// PID Variables
+float previousError = 0.0;
+float integralSum = 0.0;
 float filteredAngle = 0.0;
 float filteredDerivative = 0.0;
 float previousAngle = 0.0;
-float previousError = 0.0;
-float integralSum = 0.0;
-PID pid(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 
 // WiFi Command State
 String currentCommand = "";
 bool isBalancing = false;
-
-volatile bool mpuInterrupt = false;
-void dmpDataReady() {
-  mpuInterrupt = true;
-}
 
 void handleCommand() {
   String command;
@@ -124,12 +105,12 @@ void driveMotor(float pidValue) {
     pidValue = 0;
   }
 
-  float maxPWM = (abs(filteredAngle - setpoint) > ANGLE_THRESHOLD) ? MAX_PWM_BOOST : MAX_PWM_NORMAL;
+  float maxPWM = (abs(filteredAngle - TARGET_ANGLE) > ANGLE_THRESHOLD) ? MAX_PWM_BOOST : MAX_PWM_NORMAL;
   float limitedValue = constrain(pidValue, -maxPWM, maxPWM);
   int pwm = (int)abs(limitedValue);
 
-  if (pwm > 0 && pwm < MIN_ABS_SPEED) {
-    pwm = MIN_ABS_SPEED;
+  if (pwm > 0 && pwm < MIN_PWM_THRESHOLD) {
+    pwm = MIN_PWM_THRESHOLD;
   }
 
   if (limitedValue > 0) {
@@ -155,20 +136,20 @@ void driveMotor(float pidValue) {
 }
 
 float computePID(float currentAngle, float dt) {
-  float error = setpoint - currentAngle;
+  float error = TARGET_ANGLE - currentAngle;
 
   // Adaptive PID gains
   if (abs(error) > ERROR_THRESHOLD_HIGH) {
-    Kp = KP_MAX;
+    KP = KP_MAX;
   } else if (abs(error) < ERROR_THRESHOLD_LOW) {
-    Kp = KP_MIN;
+    KP = KP_MIN;
   } else {
-    Kp = KP_MIN + (KP_MAX - KP_MIN) * (abs(error) - ERROR_THRESHOLD_LOW) /
+    KP = KP_MIN + (KP_MAX - KP_MIN) * (abs(error) - ERROR_THRESHOLD_LOW) / 
          (ERROR_THRESHOLD_HIGH - ERROR_THRESHOLD_LOW);
   }
 
   // Non-linear proportional term
-  float pTerm = Kp * error;
+  float pTerm = KP * error;
   if (abs(error) > ANGLE_THRESHOLD) {
     pTerm *= (1.0 + NON_LINEAR_GAIN * (abs(error) - ANGLE_THRESHOLD) / ANGLE_THRESHOLD);
   }
@@ -177,7 +158,7 @@ float computePID(float currentAngle, float dt) {
   if (abs(error) < ANGLE_THRESHOLD) {
     integralSum = constrain(integralSum + error * dt, -MAX_INTEGRAL, MAX_INTEGRAL);
   }
-  float iTerm = Ki * integralSum;
+  float iTerm = KI * integralSum;
 
   // Filtered derivative term
   float derivative = (error - previousError) / dt;
@@ -192,11 +173,11 @@ float computePID(float currentAngle, float dt) {
   }
 
   // Compute base PID output
-  float pidOutput = pTerm + iTerm + Kd * filteredDerivative + feedforward;
+  float pidOutput = pTerm + iTerm + KD * filteredDerivative + feedforward;
 
-  // Disturbance observer
+  // Disturbance observer (uses previous pidOutput)
   static float previousPidOutput = 0.0;
-  estimatedDisturbance = DISTURBANCE_FILTER * estimatedDisturbance +
+  estimatedDisturbance = DISTURBANCE_FILTER * estimatedDisturbance + 
                         (1 - DISTURBANCE_FILTER) * (pTerm - previousPidOutput + velocity);
   previousPidOutput = pidOutput;
 
@@ -207,11 +188,8 @@ float computePID(float currentAngle, float dt) {
 
 void setup() {
   Serial.begin(115200);
+  Wire.begin(4, 15);
 
-  // Initialize I2C for ESP32
-  Wire.begin(4, 15); // SDA: GPIO 4, SCL: GPIO 15
-
-  // Motor setup
   pinMode(AIN1, OUTPUT);
   pinMode(AIN2, OUTPUT);
   pinMode(BIN1, OUTPUT);
@@ -221,40 +199,22 @@ void setup() {
   pinMode(STBY, OUTPUT);
   digitalWrite(STBY, HIGH);
 
-  // PWM setup
   ledcSetup(PWM_CHANNEL_A, PWM_FREQ, PWM_RESOLUTION);
   ledcAttachPin(PWMA, PWM_CHANNEL_A);
   ledcSetup(PWM_CHANNEL_B, PWM_FREQ, PWM_RESOLUTION);
   ledcAttachPin(PWMB, PWM_CHANNEL_B);
 
-  // MPU6050 setup
-  mpu.initialize();
-  devStatus = mpu.dmpInitialize();
-
-  // Supply your own gyro offsets here, scaled for min sensitivity
-  mpu.setXGyroOffset(0);
-  mpu.setYGyroOffset(0);
-  mpu.setZGyroOffset(0);
-  mpu.setZAccelOffset(0);
-
-  if (devStatus == 0) {
-    mpu.setDMPEnabled(true);
-    attachInterrupt(digitalPinToInterrupt(19), dmpDataReady, RISING); // Use GPIO 19 for interrupt
-    mpuIntStatus = mpu.getIntStatus();
-    dmpReady = true;
-    packetSize = mpu.dmpGetFIFOPacketSize();
-
-    // Setup PID
-    pid.SetMode(AUTOMATIC);
-    pid.SetSampleTime(10);
-    pid.SetOutputLimits(-255, 255);
-  } else {
-    Serial.print(F("DMP Initialization failed (code "));
-    Serial.print(devStatus);
-    Serial.println(F(")"));
+  byte status = mpu.begin();
+  if (status != 0) {
+    Serial.println(F("MPU6050 connection failed. Check wiring or address."));
+    while (1);
   }
 
-  // WiFi setup
+  Serial.println(F("Calibrating... Keep MPU still"));
+  delay(1000);
+  mpu.calcOffsets();
+  Serial.println(F("Calibration complete!"));
+
   WiFi.begin(ssid, password);
   Serial.print("Connecting to WiFi...");
   while (WiFi.status() != WL_CONNECTED) {
@@ -268,10 +228,10 @@ void setup() {
   server.on("/ping", HTTP_GET, []() {
     server.send(200, "text/plain", "pong");
   });
+
   server.begin();
   Serial.println("HTTP server started");
 
-  // Initialize motors off
   digitalWrite(AIN1, LOW);
   digitalWrite(AIN2, LOW);
   digitalWrite(BIN1, LOW);
@@ -287,54 +247,34 @@ void loop() {
 
   server.handleClient();
 
-  if (!dmpReady) return;
-
   if (isBalancing) {
     if (currentCommand == "forward") {
-      setpoint = originalSetpoint + movingAngleOffsetForward;
+      TARGET_ANGLE = 0.019 + FORWARD_ANGLE_OFFSET;
     } else if (currentCommand == "backward") {
-      setpoint = originalSetpoint + movingAngleOffsetBackward;
+      TARGET_ANGLE = 0.019 + BACKWARD_ANGLE_OFFSET;
     } else {
-      setpoint = originalSetpoint;
+      TARGET_ANGLE = 0.019;
     }
 
-    while (!mpuInterrupt && fifoCount < packetSize) {
-      if (now - lastControlTime >= 5) { // 200Hz control loop
-        float dt = (now - lastControlTime) / 1000.0;
-        lastControlTime = now;
+    if (now - lastControlTime >= LOOP_INTERVAL_MS) {
+      float dt = (now - lastControlTime) / 1000.0;
+      lastControlTime = now;
 
-        pid.Compute();
-        float rawAngle = input; // From DMP (ypr[1] * 180/M_PI + 180)
-        filteredAngle = ALPHA * filteredAngle + (1 - ALPHA) * rawAngle;
-        float pidOutput = computePID(filteredAngle, dt);
-        driveMotor(pidOutput);
+      mpu.update();
+      float rawAngle = mpu.getAngleX();
+      filteredAngle = ALPHA * filteredAngle + (1 - ALPHA) * rawAngle;
 
-        previousAngle = filteredAngle;
-      }
-    }
+      float pidOutput = computePID(filteredAngle, dt);
+      driveMotor(pidOutput);
 
-    mpuInterrupt = false;
-    mpuIntStatus = mpu.getIntStatus();
-    fifoCount = mpu.getFIFOCount();
-
-    if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
-      mpu.resetFIFO();
-      Serial.println(F("FIFO overflow!"));
-    } else if (mpuIntStatus & 0x02) {
-      while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
-      mpu.getFIFOBytes(fifoBuffer, packetSize);
-      fifoCount -= packetSize;
-
-      mpu.dmpGetQuaternion(&q, fifoBuffer);
-      mpu.dmpGetGravity(&gravity, &q);
-      mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-      input = ypr[1] * 180 / M_PI + 180;
+      previousAngle = filteredAngle;
     }
 
     if (now - lastDebugTime >= 200) {
-      Serial.printf("Angle: %.2f | Error: %.2f | PID: %.2f | KP: %.2f | Disturbance: %.2f | Command: %s\n",
-                    filteredAngle, setpoint - filteredAngle,
-                    computePID(filteredAngle, 0.005), Kp, estimatedDisturbance, currentCommand.c_str());
+      Serial.printf("Angle: %.2f | Error: %.2f | PID: %.2f | KP: %.2f | Disturbance: %.2f | Command: %s\n", 
+                    filteredAngle, TARGET_ANGLE - filteredAngle, 
+                    computePID(filteredAngle, LOOP_INTERVAL_MS / 1000.0), 
+                    KP, estimatedDisturbance, currentCommand.c_str());
       lastDebugTime = now;
     }
   } else {
